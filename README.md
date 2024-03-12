@@ -1,2 +1,2 @@
 # Malaria_Pakistan
-In this project we are analysing the association between Malaria cases and ambient temperature for two endemic districts in Pakistan. I will soon update the codes that we've used in this analysis.
+In this project, we are analysing the association between Malaria cases and ambient temperature for two endemic districts in Pakistan. Using the exposure-response function derived from the data and future increase in ambient temperature for the study locations, we have projected future climate-attributable Malaria burden in Pakistan under the intermediate and very high emission scenarios. I will soon update the codes that we've used in this analysis.
