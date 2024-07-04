@@ -1,0 +1,363 @@
+---
+title: "Malaria_temperature_Pakistan"
+author: "Dinesh Bhandari"
+date: "26/01/2024"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "//ad.monash.edu/home/User091/dbha0027/Desktop/MalariaPAK")
+library(splines)
+library(MASS)
+library(dlnm)
+library(mvmeta)
+library(splines)
+library(tsModel)
+library(lubridate)
+library(tidyverse)
+library(readr)
+library(haven)
+library(performance)
+library(ggplot2)
+library(dplyr)
+library(MuMIn)
+library(gridExtra)
+
+```
+
+
+```{r dataload, echo=TRUE}
+setwd("//ad.monash.edu/home/User091/dbha0027/Desktop/MalariaPAK")
+Lakki <- read.csv("Malaria_Lakki_Final1.csv", stringsAsFactors = FALSE)
+
+
+Lakki$date <- dmy(Lakki$Date)
+Lakki$date <- as.Date(Lakki$date, format = "%d/%m/%y")
+
+# Calculate monthly averages for each variable
+
+```
+
+
+```{r model, echo=TRUE}
+lag <- 3
+arglag <- list(fun="integer")
+
+cb <- crossbasis(Lakki$Tmean, lag=3, argvar=list(fun="thr",thr=22.4), arglag=list(fun="integer"))
+
+
+plot(cb)
+
+model <- glm(total_cases ~ cb + ns(Lakki$date, df=2*9) + offset(log(Population)) + ns(Lakki$Relative_Humidity, df=2) + ns(Lakki$Precipitation, df=2), Lakki, family=quasipoisson (link="log"), maxit = 50, na.action="na.exclude")
+
+fqaic <- function(model) {
+  loglik <- sum(dpois(model$y,model$fitted.values,log=TRUE))
+  phi <- summary(model)$dispersion
+  qaic <- -2*loglik + 2*summary(model)$df[3]*phi
+  return(qaic)
+} 
+
+fqaic(model)
+cp <- crosspred(cb, model,at = 22.4:35.3,by=0.1)
+
+pred <- crosspred(cb, model, at = 22.4:35.3, by=0.1) 
+
+allRRfit <- (pred$allRRfit-1)*100
+allRRfitlow <- (pred$allRRlow-1)*100
+allRRfithigh <- (pred$allRRhigh-1)*100
+
+
+
+
+df <- data.frame(matrix(nrow=length(pred$predvar), ncol=4))
+colnames(df) <- c("temp", "RRfit", "RRlow", "RRhigh")
+df$temp <- pred$predvar
+df$RRfit <- (pred$allRRfit-1)*100
+df$RRlow <- (pred$allRRlow-1)*100
+df$RRhigh <- (pred$allRRhigh-1)*100
+
+
+predper <- c(seq(0,1,0.1),2:98,seq(99,100,0.1))
+
+predvar <- quantile(Lakki$EHF,1:99/100,na.rm=T)
+
+xlab <- expression(paste("Temperature (",degree,"C)"))
+
+#pdf("Figure 1.pdf",height=4.5,width=10)
+layout(matrix(c(1,2),ncol=2,byrow=T))
+
+# PLOT - 3D
+par(mar=c(2,3,3,1),mgp=c(3,1,0),las=1,cex.axis=0.9,cex.lab=1)
+plot(pred,"3d",ltheta=150,xlab="Temperature (C)",ylab="Lag",zlab="RR", 
+     col=gray(0.9), main="Exposure-lag-response")
+
+
+par(mar=c(5,4,3,1),mgp=c(3,1,0),las=1,cex.axis=0.9,cex.lab=1)
+plot(pred,"overall",col="red",ylim=c(0.9,4.0),axes=T,lab=c(6,5,7),xlab=xlab,
+     ylab="RR",main="Overall")
+
+red <- crossreduce(cb,model,at = 22.4:35.3,by=0.1)
+coef <- coef(red)
+vcov <- vcov(red)
+
+
+```
+
+
+```{r Projection, echo=TRUE}
+
+#oi per day of the year
+oi <- rep(Lakki$total_cases, length=nrow(Lakki))
+
+
+#oi average per day of the year
+oimm <- tapply(Lakki$total_cases,as.numeric(format(Lakki$date,"%j")),
+               mean,na.rm=T)[seq(12)]
+
+# total oi in baseline period
+oiperiod <- sum(oimm)*9
+
+baselineperiod <- "2014-2022"
+
+
+
+#  *DEFINE SEQUENCE OF PERIODS FOR THE PREDICTIONS (PROJECTED)
+baselineseqperiod <- factor(rep(baselineperiod,length.out=12*9))
+
+seqperiod <- factor(c(as.numeric(baselineseqperiod)))
+levels(seqperiod) <- c(baselineseqperiod)
+
+
+
+# (2) DIMENSION - RANGE OF TEMPERATURES
+temprange <- c("tot","heat")
+
+# (3) DIMENSION - ABSOLUTE AN/DIFFERENCE IN AN
+absrel <- c("abs")
+
+
+# (6) DIMENSION - NUMBER OF ITERATION IN THE MONTE-CARLO SIMULATION 
+nsim <- 1000
+
+
+# DEFINE THE ARRAY
+ansim_bs <- array(NA,dim=c(length(levels(seqperiod)),length(temprange),
+                           length(absrel), nsim+1), 
+                  dimnames=list(levels(seqperiod),temprange,absrel,
+                                c("est",paste0("sim",seq(nsim)))))
+
+
+
+argvar=list(fun="thr",thr=22.4)
+
+# (4) EXTRAPOLATION OF THE CURVE: 
+# - DERIVE THE CENTERED BASIS USING THE PROJECTED TEMPERATURE SERIES
+#   AND EXTRACT PARAMETERS
+cenvec <- do.call(onebasis,c(list(x=22.4),argvar))
+bvar <- do.call(onebasis,c(list(x=Lakki$Tmean),argvar))
+bvarcen <- scale(bvar,center=cenvec,scale=F)
+
+
+# INDICATOR FOR COLD/HEAT DAYS
+indheat <- 22.4:35.3
+
+# (5) IMPACT PROJECTIONS:
+# - COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+anbaseline <- (1-exp(-bvarcen%*%coef(red)))*oi
+
+# - SUM AN (ABS) BY TEMPERATURE RANGE AND PERIOD, STORE IN ARRAY BEFORE THE ITERATIONS
+# NB: ACCOUNT FOR NO TEMPERATURE BELOW/ABOVE CEN FOR GIVEN PERIODS
+ansim_bs[,"tot","abs",1] <- tapply(anbaseline,seqperiod,sum)
+ansim_bs[,"heat","abs",1] <- tapply(anbaseline[indheat],factor(seqperiod[indheat]),sum)
+
+# (6) ESTIMATE UNCERTAINTY OF THE PROJECTED AN:
+# - SAMPLE COEF ASSUMING A MULTIVARIATE NORMAL DISTRIBUTION
+set.seed(13041975)
+coefsim <- mvrnorm(nsim,coef,vcov)
+
+# - LOOP ACROSS ITERATIONS
+for(s in seq(nsim)) {
+  
+  # COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+  anbaseline <- (1-exp(-bvarcen%*%coefsim[s,]))*oi
+  
+  # STORE THE ATTRIBUTABLE MORTALITY
+  ansim_bs[,"tot","abs",s+1] <- tapply(anbaseline,seqperiod,sum)
+  ansim_bs[,"heat","abs",s+1] <- tapply(anbaseline[indheat],factor(seqperiod[indheat]),sum)
+  
+}
+
+
+estci <- c("est","ci.l","ci.u")
+
+anabs_bs <- afabs_bs <- array(NA,dim=c(length(levels(seqperiod)),
+                                       length(estci),length(temprange)), 
+                              dimnames=list(levels(seqperiod),estci,temprange))
+
+
+# ATTRIBUTABLE NUMBERS 
+# ABSOLUTE will be estimated at 0.5 and 90 percentile
+anabs_bs[,"est",] <- apply(ansim_bs,1:2,mean)
+anabs_bs[,"ci.l",] <- apply(ansim_bs,1:2,quantile,0.025)
+anabs_bs[,"ci.u",] <- apply(ansim_bs,1:2,quantile,0.975)
+
+
+# ATTRIBUTABLE FRACTION
+afabs_bs[,,] <- anabs_bs[,,]/oiperiod*100
+
+afabs_bs
+
+#######################future projections
+
+rcp4p5 <- read.csv("Lakki_2040s_MME_45.csv")
+rcp4p5$date <- dmy(rcp4p5$date) 
+
+rcp8p5 <- read.csv("Lakki_2040s_MME_85.csv")
+rcp8p5$date <- as.Date(rcp8p5$date, format = "%d/%m/%Y")
+
+
+
+
+oimoy <- tapply(Lakki$total_cases,as.numeric(format(Lakki$date,"%m")),
+                mean,na.rm=T)[seq(12)]
+while(any(isna <- is.na(oimoy)))
+  oimoy[isna] <- rowMeans(Lag(oimoy,c(-1,1)),na.rm=T)[isna]
+oiproj <- rep(oimoy,length=nrow(rcp4p5))
+
+########################################
+
+red <- crossreduce(cb,model,at = 22.4:35.3,by=0.1)
+coef <- coef(red)
+vcov <- vcov(red)
+
+# STORE THE MORTALITY BY PERIOD
+oiperiod <- sum(oimm)*9
+
+
+#  *LABELS THE PROJECTION PERIODS
+
+projperiod <- "2044-2052"
+
+
+#  *DEFINE SEQUENCE OF PERIODS FOR THE PREDICTIONS (PROJECTED)
+#baselineseqperiod <- factor(rep(baselineperiod,length.out=365.25*13))
+projseqperiod <- factor(rep(projperiod,length.out=12*length(seq(2044,2052))))
+seqperiod <- factor(c(as.numeric(projseqperiod)))
+levels(seqperiod) <- c(projperiod)
+
+
+
+
+
+# (2) DIMENSION - RANGE OF TEMPERATURES
+temprange <- c("tot","heat")
+
+# (3) DIMENSION - ABSOLUTE AN/DIFFERENCE IN AN
+absrel <- c("abs")
+
+
+
+projperiod
+# (4) DIMENSION - GENERAL CIRCULATION MODELS
+# *LIST OF GCMs
+
+# (5) DIMENSION - SCENARIO DIMENSION
+#  *LIST OF REPRESENTATIVE CONCENTRATION PATHWAYS SCENARIOS 
+rcp <- c(RCP4.5="rcp4p5",RCP8.5="rcp8p5")
+
+# (6) DIMENSION - NUMBER OF ITERATION IN THE MONTE-CARLO SIMULATION 
+nsim <- 1000
+
+
+# DEFINE THE ARRAY
+ansim <- array(NA,dim=c(length(levels(seqperiod)),length(temprange),
+                        length(absrel), length(rcp),nsim+1), 
+               dimnames=list(levels(seqperiod),temprange,absrel,
+                             names(rcp), c("est",paste0("sim",seq(nsim)))))
+
+
+# RUN LOOP PER RCP
+for (i in seq(rcp)) {
+  
+  # PRINT
+  cat("\n\n", names(rcp)[i], "\n")
+  
+  # SELECTION OF THE PROJECTED TEMPERATURE SERIES FOR A SPECIFIC RCP SCENARIO
+  Tmeanproj <- get(rcp[[i]])
+  
+  # EXTRAPOLATION OF THE CURVE FOR ENSEMBLE MODEL:
+  # DERIVE THE CENTERED BASIS USING THE PROJECTED TEMPERATURE SERIES
+  # AND EXTRACT PARAMETERS
+  argvarproj=list(fun="thr",thr=22.4)
+  
+  bvar <- do.call(onebasis,c(list(x=Tmeanproj$Tmean),argvarproj))
+  cenvec <- do.call(onebasis,c(list(x=22.4),argvarproj))
+  bvarcen <- scale(bvar, center = cenvec, scale = FALSE)
+  
+  
+  
+  # INDICATOR FOR COLD/HEAT DAYS
+  indheat <- 22.4:35.3
+  
+  # (5) IMPACT PROJECTIONS:
+  # - COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+  an <- (1-exp(-bvarcen%*%coef(red)))*oiproj
+  
+  # - SUM AN (ABS) BY TEMPERATURE RANGE AND PERIOD, STORE IN ARRAY BEFORE THE ITERATIONS
+  # NB: ACCOUNT FOR NO TEMPERATURE BELOW/ABOVE CEN FOR GIVEN PERIODS
+  ansim[,"tot","abs",i,1] <- tapply(an,seqperiod,sum)
+  ansim[,"heat","abs",i,1] <- tapply(an[indheat],factor(seqperiod[indheat]),sum)
+  
+  # (6) ESTIMATE UNCERTAINTY OF THE PROJECTED AN:
+  # - SAMPLE COEF ASSUMING A MULTIVARIATE NORMAL DISTRIBUTION
+  set.seed(13041975)
+  coefsim <- mvrnorm(nsim,coef,vcov)
+  
+  # - LOOP ACROSS ITERATIONS
+  for(s in seq(nsim)) {
+    
+    # COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+    an <- (1-exp(-bvarcen%*%coefsim[s,]))*oi
+    
+    # STORE THE ATTRIBUTABLE MORTALITY
+    ansim[,"tot","abs",i,s+1] <- tapply(an,seqperiod,sum)
+    ansim[,"heat","abs",i,s+1] <- tapply(an[indheat],factor(seqperiod[indheat]),sum)
+    
+  }
+}
+
+
+estci <- c("est","ci.l","ci.u")
+
+anabs <- afabs <- array(NA,dim=c(length(levels(seqperiod)),
+                                 length(estci),length(temprange),length(rcp)), 
+                        dimnames=list(levels(seqperiod),estci,temprange,names(rcp)))
+
+# ATTRIBUTABLE NUMBERS 
+# ABSOLUTE will be estimated at 0.5 and 90 percentile
+anabs[,"est",,"RCP4.5"] <- apply(ansim[,,"abs","RCP4.5",],1:1,mean)
+anabs[,"ci.l",,"RCP4.5"] <- apply(ansim[,,"abs","RCP4.5",],1:1,quantile,0.025)
+anabs[,"ci.u",,"RCP4.5"] <- apply(ansim[,,"abs","RCP4.5",],1:1,quantile,0.975)
+
+anabs[,"est",,"RCP8.5"] <- apply(ansim[,,"abs","RCP8.5",],1:1,mean)
+anabs[,"ci.l",,"RCP8.5"] <- apply(ansim[,,"abs","RCP8.5",],1:1,quantile,0.025)
+anabs[,"ci.u",,"RCP8.5"] <- apply(ansim[,,"abs","RCP8.5",],1:1,quantile,0.975)
+
+dim(ansim[, , "abs","RCP4.5", ])
+# ATTRIBUTABLE FRACTION
+afabs[,,,] <- anabs[,,,]/oiperiod*100
+
+afabs
+
+afabs_bs
+
+```
+
+
+
+
+
+
